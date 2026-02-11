@@ -1,0 +1,11 @@
+name = "location-sync-api"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "location-sync"
+database_id = "fb1c7972-328e-45b6-9c57-1cff67665e97"  # wrangler d1 create location-sync で取得
+
+# API_TOKEN is managed via `wrangler secret put API_TOKEN`
+# See: https://developers.cloudflare.com/workers/configuration/secrets/

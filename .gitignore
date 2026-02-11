@@ -1,0 +1,16 @@
+# Secrets & personal config
+SKILL.md
+
+# Location data files (personal GPS history)
+Timeline.json
+locations*.csv
+chunks/
+
+# Wrangler local
+.wrangler/
+
+# Dependencies
+node_modules/
+
+# OS
+.DS_Store
