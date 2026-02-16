@@ -59,6 +59,14 @@ python scripts/import_to_api.py locations.csv --dry-run -o chunks/
 python scripts/import_to_api.py locations.csv --token <TOKEN> --chunk-size 500
 ```
 
+### H3 backfill（既存データへの空間インデックス付与）
+```bash
+python scripts/backfill_h3.py --token <TOKEN>
+
+# ドライラン（1回だけ呼び出して確認）
+python scripts/backfill_h3.py --token <TOKEN> --dry-run
+```
+
 ## Key Design Decisions
 
 - **単一ファイルWorker**: `src/index.ts` にルーター・認証・全エンドポイントをフラットに実装。フレームワーク不使用
@@ -69,16 +77,19 @@ python scripts/import_to_api.py locations.csv --token <TOKEN> --chunk-size 500
 
 ## D1 Schema
 
-`locations` テーブル: `id`, `timestamp(TEXT)`, `lat(REAL)`, `lon(REAL)`, `accuracy`, `source`, `place_id`, `semantic_type`, `activity_type`, `altitude`, `speed`, `created_at`
+`locations` テーブル: `id`, `timestamp(TEXT)`, `lat(REAL)`, `lon(REAL)`, `accuracy`, `source`, `place_id`, `semantic_type`, `activity_type`, `altitude`, `speed`, `h3_res7(TEXT)`, `h3_res9(TEXT)`, `created_at`
 
-主要インデックス: `timestamp DESC`, `(lat, lon)`, `source`, `(timestamp DESC, source)`
+主要インデックス: `timestamp DESC`, `(lat, lon)`, `source`, `(timestamp DESC, source)`, `h3_res7`, `h3_res9`, `(h3_res7, timestamp DESC)`, `(h3_res9, timestamp DESC)`
+
+H3解像度: res7（~5km²、エリアレベル）、res9（~0.1km²、施設レベル）
 
 ## API Endpoints
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | GET | `/health` | No | ヘルスチェック + レコード数 |
-| GET | `/locations` | Yes | 位置情報一覧（days/limit/source/after/before） |
+| GET | `/locations` | Yes | 位置情報一覧（days/limit/source/after/before/near_lat/near_lon/radius） |
 | GET | `/locations/latest` | Yes | 最新1件 |
 | POST | `/locations` | Yes | OwnTracks互換の位置登録 |
 | POST | `/locations/batch` | Yes | 一括インポート |
+| POST | `/locations/backfill-h3` | Yes | 既存データへのH3インデックス付与（繰り返し呼出で全件処理） |

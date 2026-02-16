@@ -1,5 +1,6 @@
 # Secrets & personal config
 SKILL.md
+.dev.vars
 
 # Location data files (personal GPS history)
 Timeline.json
