@@ -4,10 +4,13 @@ import {
 	buildNearbyParams,
 	computeH3,
 	haversineKm,
-	MAX_RADIUS_KM,
 	normalizeTimestamp,
 	type Env,
 } from "../src/index";
+
+// src/index.ts の MAX_RADIUS_KM と同値（Workersランタイムの制約で
+// エントリモジュールから定数をexportできないため、値を直接持つ）
+const MAX_RADIUS_KM = 5 * 1.406;
 
 const env = { API_TOKEN: "secret-token" } as Env;
 

@@ -112,7 +112,9 @@ export function computeH3(lat: unknown, lon: unknown): { h3_res7: string | null;
 const MAX_GRID_K = 5;
 
 // 検索可能な最大半径。res7 × k=5 でカバーできる範囲（~7km）まで。
-export const MAX_RADIUS_KM = MAX_GRID_K * 1.406;
+// 注意: Workersランタイムはエントリモジュールからの関数以外のexportを
+// 許可しないため、この定数はexportしない（テスト側は値を直接持つ）
+const MAX_RADIUS_KM = MAX_GRID_K * 1.406;
 
 export function buildNearbyParams(lat: number, lon: number, radiusKm: number): {
 	column: string;
