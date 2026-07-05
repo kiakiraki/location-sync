@@ -16,29 +16,31 @@ Google Timeline（Takeoutエクスポート）の履歴データとOwnTracksア�
 ```
 
 - **API（Workers）**: `src/index.ts` — 単一ファイルにルーティング・認証・全ハンドラを実装
-- **DB**: Cloudflare D1（SQLite互換）。スキーマは `migrations/` 配下のSQL
+- **DB**: Cloudflare D1（SQLite互換）。スキーマは `migrations/` 配下のSQL（番号順に全適用）
 - **データパイプライン**: `parse_location_history.py`（JSON→CSV変換）→ `scripts/import_to_api.py`（CSV→API投入）
-- **認証**: Bearer Token（`wrangler.toml` の `API_TOKEN`）。OwnTracksのBasic Authにも対応
+- **認証**: Bearer Token（`wrangler secret put API_TOKEN` で管理）。OwnTracksのBasic Authにも対応
 
 ## Commands
 
 ### デプロイ
 ```bash
-npx wrangler deploy
+npm run deploy
 ```
 
 ### D1マイグレーション
 ```bash
-# ローカル
+# ローカル（migrations/*.sql を番号順に全適用）
 npx wrangler d1 execute location-sync --local --file=migrations/0001_create_locations.sql
 
 # 本番
 npx wrangler d1 execute location-sync --remote --file=migrations/0001_create_locations.sql
 ```
 
-### ローカル開発
+### ローカル開発・チェック
 ```bash
-npx wrangler dev
+npm run dev        # wrangler dev
+npm run typecheck  # tsc --noEmit
+npm test           # vitest
 ```
 
 ### Google Takeoutデータの変換・インポート
@@ -71,15 +73,16 @@ python scripts/backfill_h3.py --token <TOKEN> --dry-run
 
 - **単一ファイルWorker**: `src/index.ts` にルーター・認証・全エンドポイントをフラットに実装。フレームワーク不使用
 - **OwnTracks互換**: POST /locations は OwnTracks HTTP modeのペイロード（`_type: "location"`）を受け付け、レスポンスは空配列 `[]` を返す
-- **バッチインポート**: D1のバッチ制限を考慮し、API側で100件ずつ `DB.batch()` で処理。クライアント側は500件チャンクで送信
-- **タイムスタンプ混在**: 歴史データはJST（+09:00）、OwnTracksデータはUTC。表示時はJSTに変換が必要
+- **バッチインポート**: D1のバッチ制限を考慮し、API側で100件ずつ `DB.batch()` で処理。クライアント側は500件チャンクで送信。`INSERT OR IGNORE` + UNIQUE(timestamp, lat, lon, source) で冪等
+- **タイムスタンプ正準形**: 全行UTC ISO 8601（`YYYY-MM-DDTHH:MM:SS.sssZ`）で保存（`normalizeTimestamp()` で書き込み時に正規化）。素の文字列比較で時系列順が成立し、timestampインデックスが効く
+- **空間検索の制約**: D1のバインドパラメータ上限（100個/クエリ）のため gridDisk は k<=5（最大91セル）。radius上限は約7km。H3絞り込み後にhaversineで正確な半径にフィルタ
 - **Google Timeline対応**: `parse_location_history.py` は旧形式（`latitudeE7`）・新形式（`semanticSegments`）・`rawSignals` など複数のエクスポート形式に対応
 
 ## D1 Schema
 
 `locations` テーブル: `id`, `timestamp(TEXT)`, `lat(REAL)`, `lon(REAL)`, `accuracy`, `source`, `place_id`, `semantic_type`, `activity_type`, `altitude`, `speed`, `h3_res7(TEXT)`, `h3_res9(TEXT)`, `created_at`
 
-主要インデックス: `timestamp DESC`, `(lat, lon)`, `source`, `(timestamp DESC, source)`, `h3_res7`, `h3_res9`, `(h3_res7, timestamp DESC)`, `(h3_res9, timestamp DESC)`
+主要インデックス: `timestamp DESC`, `(lat, lon)`, `source`, `(timestamp DESC, source)`, `h3_res7`, `h3_res9`, `(h3_res7, timestamp DESC)`, `(h3_res9, timestamp DESC)`, UNIQUE `(timestamp, lat, lon, source)`
 
 H3解像度: res7（~5km²、エリアレベル）、res9（~0.1km²、施設レベル）
 

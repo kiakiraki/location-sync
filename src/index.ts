@@ -21,6 +21,17 @@ export interface Env {
 
 // --- Auth ---
 
+// タイミング攻撃対策の定数時間比較（長さの一致だけは先に判定する）
+function safeEqual(a: string, b: string): boolean {
+	const enc = new TextEncoder();
+	const ab = enc.encode(a);
+	const bb = enc.encode(b);
+	if (ab.length !== bb.length) return false;
+	let diff = 0;
+	for (let i = 0; i < ab.length; i++) diff |= ab[i] ^ bb[i];
+	return diff === 0;
+}
+
 export function authenticate(request: Request, env: Env): boolean {
 	const auth = request.headers.get("Authorization");
 	if (!auth) return false;
@@ -28,7 +39,7 @@ export function authenticate(request: Request, env: Env): boolean {
 	// Bearer Token
 	if (auth.startsWith("Bearer ")) {
 		const token = auth.replace("Bearer ", "").trim();
-		return token === env.API_TOKEN;
+		return safeEqual(token, env.API_TOKEN);
 	}
 
 	// Basic Auth (OwnTracks HTTP mode)
@@ -36,8 +47,9 @@ export function authenticate(request: Request, env: Env): boolean {
 	if (auth.startsWith("Basic ")) {
 		try {
 			const decoded = atob(auth.replace("Basic ", "").trim());
-			const [, password] = decoded.split(":");
-			return password === env.API_TOKEN;
+			const sep = decoded.indexOf(":");
+			if (sep < 0) return false;
+			return safeEqual(decoded.slice(sep + 1), env.API_TOKEN);
 		} catch {
 			return false;
 		}
@@ -56,10 +68,7 @@ function unauthorized(): Response {
 function jsonResponse(data: unknown, status = 200): Response {
 	return new Response(JSON.stringify(data), {
 		status,
-		headers: {
-			"Content-Type": "application/json",
-			"Access-Control-Allow-Origin": "*",
-		},
+		headers: { "Content-Type": "application/json" },
 	});
 }
 
@@ -82,22 +91,6 @@ async function readJsonBody(request: Request): Promise<Record<string, unknown> |
 	} catch {
 		return null;
 	}
-}
-
-// --- CORS ---
-
-function handleCors(request: Request): Response | null {
-	if (request.method === "OPTIONS") {
-		return new Response(null, {
-			headers: {
-				"Access-Control-Allow-Origin": "*",
-				"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-				"Access-Control-Allow-Headers": "Content-Type, Authorization",
-				"Access-Control-Max-Age": "86400",
-			},
-		});
-	}
-	return null;
 }
 
 // --- H3 helpers ---
@@ -537,10 +530,6 @@ async function handleBackfillH3(env: Env): Promise<Response> {
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
-		// CORS preflight
-		const corsResponse = handleCors(request);
-		if (corsResponse) return corsResponse;
-
 		const url = new URL(request.url);
 		const path = url.pathname;
 		const method = request.method;
