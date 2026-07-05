@@ -15,7 +15,7 @@ Google Timeline（Takeoutエクスポート）の履歴データとOwnTracksア�
 [Claude Skill]   ←  GET /locations   ← Workers ← D1
 ```
 
-- **API（Workers）**: `src/index.ts` — 単一ファイルにルーティング・認証・全ハンドラを実装
+- **API（Workers）**: `src/index.ts` — 単一ファイルにルーティング・認証・全ハンドラを実装。`scheduled` ハンドラ（毎時cron）でOwnTracksの死活監視（`STALE_HOURS` 以上途絶でSlack通知、secretは `SLACK_WEBHOOK_URL`）
 - **DB**: Cloudflare D1（SQLite互換）。スキーマは `migrations/` 配下のSQL（番号順に全適用）
 - **データパイプライン**: `parse_location_history.py`（JSON→CSV変換）→ `scripts/import_to_api.py`（CSV→API投入）
 - **認証**: Bearer Token（`wrangler secret put API_TOKEN` で管理）。OwnTracksのBasic Authにも対応
