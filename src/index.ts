@@ -21,7 +21,7 @@ export interface Env {
 
 // --- Auth ---
 
-function authenticate(request: Request, env: Env): boolean {
+export function authenticate(request: Request, env: Env): boolean {
 	const auth = request.headers.get("Authorization");
 	if (!auth) return false;
 
@@ -85,7 +85,7 @@ function handleCors(request: Request): Response | null {
 
 // --- H3 helpers ---
 
-function computeH3(lat: unknown, lon: unknown): { h3_res7: string | null; h3_res9: string | null } {
+export function computeH3(lat: unknown, lon: unknown): { h3_res7: string | null; h3_res9: string | null } {
 	if (lat == null || lon == null) return { h3_res7: null, h3_res9: null };
 	const la = Number(lat);
 	const lo = Number(lon);
