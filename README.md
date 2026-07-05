@@ -99,6 +99,22 @@ Android OwnTracks アプリ:
 3. Headers → Authorization: `Bearer YOUR_TOKEN`
 4. Monitoring: **Significant changes** (バッテリー節約) or **Move** (高頻度)
 
+## OwnTracks 死活監視
+
+Cron Trigger（毎時）で `source = 'owntracks'` の最新レコードを確認し、
+`STALE_HOURS`（デフォルト24時間）以上データが途絶えていたらSlackに通知する。
+
+- 通知先: `wrangler secret put SLACK_WEBHOOK_URL`（Slack Incoming Webhook URL）
+- しきい値: `wrangler.toml` の `[vars] STALE_HOURS`
+- 再通知: しきい値超過時に1回、以降は途絶が続く限り24時間ごとに1回
+
+ローカルでの動作確認:
+
+```bash
+npx wrangler dev --test-scheduled
+curl "http://localhost:8787/__scheduled?cron=0+*+*+*+*"   # cronを疑似発火
+```
+
 ## API Reference
 
 | Method | Path | Auth | Description |

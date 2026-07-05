@@ -17,6 +17,8 @@ import { latLngToCell, gridDisk } from "h3-js";
 export interface Env {
 	DB: D1Database;
 	API_TOKEN: string;
+	SLACK_WEBHOOK_URL: string;
+	STALE_HOURS: string;
 }
 
 // --- Auth ---
@@ -528,6 +530,56 @@ async function handleBackfillH3(env: Env): Promise<Response> {
 	});
 }
 
+// --- OwnTracks死活監視 ---
+
+// 毎時のcronから呼ばれる前提の再通知判定。
+// 経過時間がしきい値を超えた直後（1時間幅）に1回、以降は24時間ごとに1回だけ
+// trueを返す。状態を持たずに「しつこくない再通知」を実現する
+export function shouldNotifyStale(staleHours: number, thresholdHours: number): boolean {
+	if (!isFinite(staleHours) || staleHours < thresholdHours) return false;
+	return (staleHours - thresholdHours) % 24 < 1;
+}
+
+async function checkOwntracksFreshness(env: Env): Promise<void> {
+	if (!env.SLACK_WEBHOOK_URL) {
+		console.error("monitor: SLACK_WEBHOOK_URL is not configured");
+		return;
+	}
+
+	const latest = await env.DB.prepare(
+		"SELECT timestamp FROM locations WHERE source = 'owntracks' ORDER BY timestamp DESC LIMIT 1"
+	).first<{ timestamp: string }>();
+
+	if (!latest) {
+		// OwnTracksのデータが1件もない（セットアップ前）場合は監視しない
+		return;
+	}
+
+	const staleHours = (Date.now() - Date.parse(latest.timestamp)) / 3_600_000;
+	const threshold = Number(env.STALE_HOURS) || 24;
+
+	if (!shouldNotifyStale(staleHours, threshold)) {
+		return;
+	}
+
+	const lastSeenJst = new Date(latest.timestamp).toLocaleString("ja-JP", {
+		timeZone: "Asia/Tokyo",
+	});
+	const resp = await fetch(env.SLACK_WEBHOOK_URL, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			text:
+				`⚠️ OwnTracksからの位置情報が *${Math.floor(staleHours)}時間* 途絶えています\n` +
+				`最終受信: ${lastSeenJst}（JST）\n` +
+				`アプリの動作・バッテリー最適化設定を確認してください`,
+		}),
+	});
+	if (!resp.ok) {
+		console.error(`monitor: Slack notification failed: ${resp.status} ${await resp.text()}`);
+	}
+}
+
 // --- Router ---
 
 export default {
@@ -564,5 +616,9 @@ export default {
 		}
 
 		return errorResponse("Not found", 404);
+	},
+
+	async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+		ctx.waitUntil(checkOwntracksFreshness(env));
 	},
 };

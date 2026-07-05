@@ -5,6 +5,7 @@ import {
 	computeH3,
 	haversineKm,
 	normalizeTimestamp,
+	shouldNotifyStale,
 	type Env,
 } from "../src/index";
 
@@ -90,6 +91,35 @@ describe("haversineKm", () => {
 		const d = haversineKm(35.681236, 139.767125, 34.702485, 135.495951);
 		expect(d).toBeGreaterThan(395);
 		expect(d).toBeLessThan(410);
+	});
+});
+
+describe("shouldNotifyStale", () => {
+	it("does not notify below the threshold", () => {
+		expect(shouldNotifyStale(23.9, 24)).toBe(false);
+		expect(shouldNotifyStale(0, 24)).toBe(false);
+	});
+
+	it("notifies within the first hour after crossing the threshold", () => {
+		expect(shouldNotifyStale(24.0, 24)).toBe(true);
+		expect(shouldNotifyStale(24.5, 24)).toBe(true);
+		expect(shouldNotifyStale(25.0, 24)).toBe(false); // 窓を過ぎたら黙る
+	});
+
+	it("re-notifies once every 24 hours while stale", () => {
+		expect(shouldNotifyStale(48.5, 24)).toBe(true);
+		expect(shouldNotifyStale(49.5, 24)).toBe(false);
+		expect(shouldNotifyStale(72.2, 24)).toBe(true);
+	});
+
+	it("respects a custom threshold", () => {
+		expect(shouldNotifyStale(36.5, 36)).toBe(true);
+		expect(shouldNotifyStale(35.5, 36)).toBe(false);
+	});
+
+	it("stays silent for non-finite input (no data)", () => {
+		expect(shouldNotifyStale(Infinity, 24)).toBe(false);
+		expect(shouldNotifyStale(NaN, 24)).toBe(false);
 	});
 });
 

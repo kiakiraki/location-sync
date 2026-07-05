@@ -7,5 +7,15 @@ binding = "DB"
 database_name = "location-sync"
 database_id = "fb1c7972-328e-45b6-9c57-1cff67665e97"  # wrangler d1 create location-sync で取得
 
-# API_TOKEN is managed via `wrangler secret put API_TOKEN`
+# OwnTracks死活監視: 毎時実行し、位置情報が途絶えていたらSlackに通知
+[triggers]
+crons = ["0 * * * *"]
+
+[vars]
+# この時間（h）以上OwnTracksからデータが来なければ警報
+STALE_HOURS = "24"
+
+# Secrets (`wrangler secret put <NAME>` で管理):
+#   API_TOKEN         - API認証トークン
+#   SLACK_WEBHOOK_URL - 死活監視の通知先（Slack Incoming Webhook）
 # See: https://developers.cloudflare.com/workers/configuration/secrets/
