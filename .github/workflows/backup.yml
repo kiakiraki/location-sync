@@ -1,0 +1,91 @@
+name: Backup D1
+
+on:
+  schedule:
+    - cron: "0 18 * * 6" # 毎週日曜 3:00 JST（土曜 18:00 UTC）
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_BACKUP_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      BUCKET: location-sync-backups
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      - name: Export D1 database
+        run: npx wrangler d1 export location-sync --remote --output=backup.sql
+
+      - name: Sanity check
+        run: |
+          # 空・壊れたダンプを黙って保存しないための健全性チェック。
+          # 現在のダンプは~99MB。DBは基本的に増える一方なので50MBを下限とする
+          SIZE=$(stat -c %s backup.sql)
+          if [ "$SIZE" -lt 52428800 ]; then
+            echo "::error::dump too small: ${SIZE} bytes"; exit 1
+          fi
+          grep -q "CREATE TABLE locations" backup.sql
+          gzip backup.sql
+          gzip -t backup.sql.gz
+          echo "GZ_SIZE=$(du -h backup.sql.gz | cut -f1)" >> "$GITHUB_ENV"
+          echo "RAW_SIZE=$(numfmt --to=iec "$SIZE")" >> "$GITHUB_ENV"
+
+      - name: Upload to R2 (weekly)
+        run: |
+          KEY_DATE=$(TZ=Asia/Tokyo date +%F)
+          npx wrangler r2 object put "$BUCKET/weekly/${KEY_DATE}.sql.gz" \
+            --file=backup.sql.gz --remote
+          echo "KEY=weekly/${KEY_DATE}.sql.gz" >> "$GITHUB_ENV"
+
+      - name: Upload to R2 (monthly, first week only)
+        run: |
+          # JSTで月の第1週（1〜7日）の実行時のみ月次コピーも保存
+          if [ "$(TZ=Asia/Tokyo date +%-d)" -le 7 ]; then
+            KEY_MONTH=$(TZ=Asia/Tokyo date +%Y-%m)
+            npx wrangler r2 object put "$BUCKET/monthly/${KEY_MONTH}.sql.gz" \
+              --file=backup.sql.gz --remote
+            echo "monthly/${KEY_MONTH}.sql.gz saved"
+          fi
+
+      - name: Prune old backups
+        run: |
+          # weekly: 8世代保持（9〜16週前の日曜分を削除。存在しないキーは無視）
+          # 注: workflow_dispatch の手動実行分（日曜以外の日付キー）は対象外なので
+          #     溜まったら手動で消すこと
+          for i in 9 10 11 12 13 14 15 16; do
+            OLD=$(TZ=Asia/Tokyo date -d "-${i} weeks" +%F)
+            npx wrangler r2 object delete "$BUCKET/weekly/${OLD}.sql.gz" --remote || true
+          done
+          # monthly: 12世代保持（13〜18ヶ月前を削除）
+          for i in 13 14 15 16 17 18; do
+            OLD=$(TZ=Asia/Tokyo date -d "-${i} months" +%Y-%m)
+            npx wrangler r2 object delete "$BUCKET/monthly/${OLD}.sql.gz" --remote || true
+          done
+
+      - name: Notify success
+        if: success()
+        run: |
+          RECORDS=$(curl -s --max-time 15 https://location-sync-api.kiakiraki.workers.dev/health \
+            | python3 -c "import json,sys; print(f\"{json.load(sys.stdin)['records']:,}\")" || echo "?")
+          printf '{"text":"✅ location-sync バックアップ成功\\n%s（%s / 展開後 %s）→ R2\\nDB件数: %s行"}' \
+            "$KEY" "$GZ_SIZE" "$RAW_SIZE" "$RECORDS" \
+            | curl -s -X POST "$SLACK_WEBHOOK_URL" -H 'Content-Type: application/json' -d @-
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Notify failure
+        if: failure()
+        run: |
+          printf '{"text":"❌ location-sync バックアップ失敗\\n%s"}' \
+            "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            | curl -s -X POST "$SLACK_WEBHOOK_URL" -H 'Content-Type: application/json' -d @-
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

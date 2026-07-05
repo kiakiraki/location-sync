@@ -115,6 +115,41 @@ npx wrangler dev --test-scheduled
 curl "http://localhost:8787/__scheduled?cron=0+*+*+*+*"   # cronを疑似発火
 ```
 
+## バックアップ
+
+3層構成:
+
+1. **D1 Time Travel**（自動・設定不要）: 直近30日以内なら分単位で巻き戻し可能
+2. **週次フルダンプ → R2**: `.github/workflows/backup.yml` が毎週日曜3:00 JSTに
+   `wrangler d1 export` でダンプを取得し、gzipして `location-sync-backups`
+   バケットに保存。結果はSlackに通知（成功・失敗とも）
+   - 保持: weekly 8世代 + monthly 12世代（月の第1週に月次コピー）
+   - 使用secret: `CLOUDFLARE_BACKUP_API_TOKEN`（D1 Read + R2 Edit の専用トークン）,
+     `SLACK_WEBHOOK_URL`
+   - 注意: `workflow_dispatch` の手動実行分（日曜以外の日付キー）は自動削除の
+     対象外なので、溜まったら手動で削除する
+3. **復元手順**（下記）: 初回リハーサル済み（2026-07-05、309,903行の完全一致を確認）
+
+### 復元手順
+
+```bash
+# バックアップを取得・展開
+npx wrangler r2 object get "location-sync-backups/weekly/YYYY-MM-DD.sql.gz" \
+  --file=dump.sql.gz --remote
+gunzip dump.sql.gz
+
+# まず別DBに復元して中身を確認（いきなり本番に上書きしない）
+npx wrangler d1 create location-sync-restore
+npx wrangler d1 execute location-sync-restore --remote --file=dump.sql
+
+# 確認後、wrangler.toml の database_id を差し替えてデプロイ
+```
+
+30日以内の巻き戻しであれば Time Travel の方が速い:
+```bash
+npx wrangler d1 time-travel restore location-sync --timestamp=<UNIX秒>
+```
+
 ## API Reference
 
 | Method | Path | Auth | Description |
