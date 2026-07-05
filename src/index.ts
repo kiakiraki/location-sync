@@ -163,6 +163,22 @@ export function normalizeTimestamp(input: unknown): string | null {
 
 // --- Handlers ---
 
+// GET /locations の fields= で指定できる実カラム名（許可リスト）。
+// distance_km はnear検索時のみ算出される仮想フィールドなのでここには含めない
+const ALLOWED_FIELDS = [
+	"id", "timestamp", "lat", "lon", "accuracy", "source", "place_id",
+	"semantic_type", "activity_type", "altitude", "speed", "h3_res7", "h3_res9", "created_at",
+];
+
+// 許可リスト済みのフィールドのみを持つオブジェクトに絞り込む
+function projectFields(row: Record<string, unknown>, fields: string[]): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	for (const f of fields) {
+		if (f in row) out[f] = row[f];
+	}
+	return out;
+}
+
 async function handleHealth(env: Env): Promise<Response> {
 	try {
 		const result = await env.DB.prepare(
@@ -197,6 +213,19 @@ async function handleGetLocations(request: Request, env: Env): Promise<Response>
 		return errorResponse("before must be a valid ISO 8601 datetime");
 	}
 
+	// フィールド選択（?fields=timestamp,lat,lon）。空要素は無視、fields=""は指定なし扱い
+	const fieldsParam = url.searchParams.get("fields");
+	let requestedFields: string[] | null = null;
+	if (fieldsParam) {
+		const parsed = fieldsParam.split(",").map((f) => f.trim()).filter((f) => f !== "");
+		for (const f of parsed) {
+			if (f !== "distance_km" && !ALLOWED_FIELDS.includes(f)) {
+				return errorResponse(`invalid field: ${f}`);
+			}
+		}
+		if (parsed.length > 0) requestedFields = parsed;
+	}
+
 	// 空間フィルタ
 	const nearLat = url.searchParams.get("near_lat");
 	const nearLon = url.searchParams.get("near_lon");
@@ -221,7 +250,20 @@ async function handleGetLocations(request: Request, env: Env): Promise<Response>
 		};
 	}
 
-	let query = "SELECT * FROM locations WHERE 1=1";
+	// fields指定時はSELECT句を許可リスト済みの列名から動的に組み立てる。
+	// near検索はhaversine算出にlat/lonが必要なので、出力対象になくても内部的にSELECTしておく
+	let selectColumns = "*";
+	if (requestedFields) {
+		const dbColumns = new Set(requestedFields.filter((f) => f !== "distance_km"));
+		if (spatialFilter) {
+			dbColumns.add("lat");
+			dbColumns.add("lon");
+		}
+		dbColumns.add("id"); // SQLは最低1列必要。出力時にprojectFieldsで落とされる
+		selectColumns = [...dbColumns].join(", ");
+	}
+
+	let query = `SELECT ${selectColumns} FROM locations WHERE 1=1`;
 	const params: unknown[] = [];
 
 	// 空間フィルタ指定時かつafter未指定の場合、デフォルトのdays制限を外す
@@ -255,15 +297,23 @@ async function handleGetLocations(request: Request, env: Env): Promise<Response>
 
 	const results = await env.DB.prepare(query).bind(...params).all();
 
-	// H3セルは六角形なので円と完全には一致しない。haversineで正確な半径に絞る
-	let locations = results.results;
+	// H3セルは六角形なので円と完全には一致しない。haversineで正確な半径に絞りつつ、
+	// 各行に distance_km（小数3桁）を付与する（haversineの計算は1回のみ）
+	let locations: Record<string, unknown>[] = results.results;
 	if (spatialFilter && spatialMeta) {
 		const { lat, lon } = spatialMeta.query_center as { lat: number; lon: number };
 		const radiusKm = spatialMeta.radius_km as number;
-		locations = locations.filter((row) => {
+		locations = locations.flatMap((row) => {
 			const r = row as { lat: number | null; lon: number | null };
-			return r.lat != null && r.lon != null && haversineKm(lat, lon, r.lat, r.lon) <= radiusKm;
+			if (r.lat == null || r.lon == null) return [];
+			const distanceKm = haversineKm(lat, lon, r.lat, r.lon);
+			if (distanceKm > radiusKm) return [];
+			return [{ ...row, distance_km: Math.round(distanceKm * 1000) / 1000 }];
 		});
+	}
+
+	if (requestedFields) {
+		locations = locations.map((row) => projectFields(row, requestedFields));
 	}
 
 	const response: Record<string, unknown> = {

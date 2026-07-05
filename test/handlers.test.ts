@@ -288,6 +288,80 @@ describe("GET /locations (near search)", () => {
 		});
 		expect(resp.status).toBe(400);
 	});
+
+	it("attaches distance_km to each result, within the radius", async () => {
+		await importBatch(points);
+
+		const body = await near(35.681236, 139.767125, 1);
+		const withDistance = body.locations as unknown as { source: string; distance_km: number }[];
+		for (const loc of withDistance) {
+			expect(loc.distance_km).toBeTypeOf("number");
+			expect(loc.distance_km).toBeLessThanOrEqual(1);
+		}
+	});
+});
+
+describe("GET /locations (fields=)", () => {
+	// 通常検索（nearなし）はデフォルトで直近7日間のみが対象なので、固定日付ではなく相対時刻を使う
+	const points = [
+		{ timestamp: isoHoursAgo(1), lat: 35.681236, lon: 139.767125, source: "tokyo-sta" },
+		{ timestamp: isoHoursAgo(2), lat: 35.6867, lon: 139.7671, source: "tokyo-600m" },
+	];
+
+	it("does not attach distance_km for a non-spatial search", async () => {
+		await importBatch(points);
+		const resp = await SELF.fetch(`${BASE}/locations`, { headers: AUTH });
+		const body = (await resp.json()) as { locations: Record<string, unknown>[] };
+		for (const loc of body.locations) {
+			expect(loc).not.toHaveProperty("distance_km");
+		}
+	});
+
+	it("returns only the requested fields", async () => {
+		await importBatch(points);
+		const resp = await SELF.fetch(`${BASE}/locations?fields=timestamp,lat,lon`, { headers: AUTH });
+		expect(resp.status).toBe(200);
+		const body = (await resp.json()) as { locations: Record<string, unknown>[] };
+		expect(body.locations.length).toBe(2);
+		for (const loc of body.locations) {
+			expect(Object.keys(loc).sort()).toEqual(["lat", "lon", "timestamp"]);
+		}
+	});
+
+	it("rejects an unknown field name", async () => {
+		await importBatch(points);
+		const resp = await SELF.fetch(`${BASE}/locations?fields=timestamp,password`, { headers: AUTH });
+		expect(resp.status).toBe(400);
+		expect(await resp.json()).toEqual({ error: "invalid field: password" });
+	});
+
+	it("near search + fields=timestamp,distance_km returns only those two keys", async () => {
+		await importBatch(points);
+		const resp = await SELF.fetch(
+			`${BASE}/locations?near_lat=35.681236&near_lon=139.767125&radius=1&fields=timestamp,distance_km`,
+			{ headers: AUTH },
+		);
+		expect(resp.status).toBe(200);
+		const body = (await resp.json()) as { locations: Record<string, unknown>[] };
+		expect(body.locations.length).toBe(2);
+		for (const loc of body.locations) {
+			expect(Object.keys(loc).sort()).toEqual(["distance_km", "timestamp"]);
+		}
+	});
+
+	it("near search + fields=timestamp (no distance_km) omits distance_km", async () => {
+		await importBatch(points);
+		const resp = await SELF.fetch(
+			`${BASE}/locations?near_lat=35.681236&near_lon=139.767125&radius=1&fields=timestamp`,
+			{ headers: AUTH },
+		);
+		expect(resp.status).toBe(200);
+		const body = (await resp.json()) as { locations: Record<string, unknown>[] };
+		expect(body.locations.length).toBe(2);
+		for (const loc of body.locations) {
+			expect(Object.keys(loc)).toEqual(["timestamp"]);
+		}
+	});
 });
 
 describe("GET /locations/latest", () => {

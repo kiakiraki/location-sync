@@ -172,6 +172,10 @@ npx wrangler d1 time-travel restore location-sync --timestamp=<UNIX秒>
 | `before` | - | この日時以前（ISO 8601） |
 | `near_lat` / `near_lon` | - | 空間検索の中心座標（両方指定で有効） |
 | `radius` | 1 | 検索半径km（0.1〜約7）。H3セルで絞り込み後、haversineで正確な半径にフィルタ |
+| `fields` | - | レスポンスに含める列をカンマ区切りで指定（例: `timestamp,lat,lon`）。仮想フィールド `distance_km` も指定可 |
+
+空間検索時は各locationに中心からの距離 `distance_km`（小数3桁）が付与される
+（`fields` 指定時は `distance_km` を含めた場合のみ）。
 
 タイムスタンプはすべてUTC ISO 8601（`YYYY-MM-DDTHH:MM:SS.sssZ`）の正準形で
 保存・返却される。

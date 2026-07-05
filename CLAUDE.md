@@ -91,7 +91,7 @@ H3解像度: res7（~5km²、エリアレベル）、res9（~0.1km²、施設レ
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | GET | `/health` | No | ヘルスチェック + レコード数 |
-| GET | `/locations` | Yes | 位置情報一覧（days/limit/source/after/before/near_lat/near_lon/radius） |
+| GET | `/locations` | Yes | 位置情報一覧（days/limit/source/after/before/near_lat/near_lon/radius/fields）。near検索時は各行に `distance_km` を付与 |
 | GET | `/locations/latest` | Yes | 最新1件 |
 | POST | `/locations` | Yes | OwnTracks互換の位置登録 |
 | POST | `/locations/batch` | Yes | 一括インポート |
