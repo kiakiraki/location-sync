@@ -96,20 +96,39 @@ function computeH3(lat: unknown, lon: unknown): { h3_res7: string | null; h3_res
 	};
 }
 
-function buildNearbyParams(lat: number, lon: number, radiusKm: number): {
+// D1のバインドパラメータ上限（100個/クエリ）を超えないよう k <= 5 に制限する。
+// gridDisk(k=5) は 91セル。他の条件パラメータ（after/before/source/limit）を
+// 合わせても100未満に収まる。
+const MAX_GRID_K = 5;
+
+// 検索可能な最大半径。res7 × k=5 でカバーできる範囲（~7km）まで。
+export const MAX_RADIUS_KM = MAX_GRID_K * 1.406;
+
+export function buildNearbyParams(lat: number, lon: number, radiusKm: number): {
 	column: string;
 	cells: string[];
 } {
-	// radius >= 2km → res7 (avg edge ~1.406km), else res9 (avg edge ~0.201km)
-	if (radiusKm >= 2) {
-		const k = Math.min(Math.ceil(radiusKm / 1.406), 10);
+	// radius > 1km → res7 (avg edge ~1.406km), else res9 (avg edge ~0.201km)
+	// res9 は k <= 5 でカバーできる ~1km までに限定する
+	if (radiusKm > MAX_GRID_K * 0.201) {
+		const k = Math.min(Math.ceil(radiusKm / 1.406), MAX_GRID_K);
 		const center = latLngToCell(lat, lon, 7);
 		return { column: "h3_res7", cells: gridDisk(center, k) };
 	} else {
-		const k = Math.min(Math.ceil(radiusKm / 0.201), 10);
+		const k = Math.min(Math.ceil(radiusKm / 0.201), MAX_GRID_K);
 		const center = latLngToCell(lat, lon, 9);
 		return { column: "h3_res9", cells: gridDisk(center, k) };
 	}
+}
+
+export function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+	const toRad = (d: number) => (d * Math.PI) / 180;
+	const dLat = toRad(lat2 - lat1);
+	const dLon = toRad(lon2 - lon1);
+	const a =
+		Math.sin(dLat / 2) ** 2 +
+		Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+	return 6371 * 2 * Math.asin(Math.sqrt(a));
 }
 
 // --- Timestamp normalization ---
@@ -161,7 +180,7 @@ async function handleGetLocations(request: Request, env: Env): Promise<Response>
 		if (isNaN(lat) || isNaN(lon)) {
 			return errorResponse("near_lat and near_lon must be valid numbers");
 		}
-		const radiusKm = Math.min(Math.max(parseFloat(radiusParam ?? "1"), 0.1), 50);
+		const radiusKm = Math.min(Math.max(parseFloat(radiusParam ?? "1"), 0.1), MAX_RADIUS_KM);
 		spatialFilter = buildNearbyParams(lat, lon, radiusKm);
 		spatialMeta = {
 			query_center: { lat, lon },
@@ -205,9 +224,20 @@ async function handleGetLocations(request: Request, env: Env): Promise<Response>
 
 	const results = await env.DB.prepare(query).bind(...params).all();
 
+	// H3セルは六角形なので円と完全には一致しない。haversineで正確な半径に絞る
+	let locations = results.results;
+	if (spatialFilter && spatialMeta) {
+		const { lat, lon } = spatialMeta.query_center as { lat: number; lon: number };
+		const radiusKm = spatialMeta.radius_km as number;
+		locations = locations.filter((row) => {
+			const r = row as { lat: number | null; lon: number | null };
+			return r.lat != null && r.lon != null && haversineKm(lat, lon, r.lat, r.lon) <= radiusKm;
+		});
+	}
+
 	const response: Record<string, unknown> = {
-		count: results.results.length,
-		locations: results.results,
+		count: locations.length,
+		locations,
 	};
 
 	if (spatialMeta) {
