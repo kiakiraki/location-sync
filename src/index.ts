@@ -288,7 +288,7 @@ async function handlePostLocation(request: Request, env: Env): Promise<Response>
 		const h3 = computeH3(body.lat, body.lon);
 
 		await env.DB.prepare(
-			`INSERT INTO locations (timestamp, lat, lon, accuracy, altitude, speed, source, h3_res7, h3_res9)
+			`INSERT OR IGNORE INTO locations (timestamp, lat, lon, accuracy, altitude, speed, source, h3_res7, h3_res9)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 		).bind(
 			timestamp,
@@ -314,7 +314,7 @@ async function handlePostLocation(request: Request, env: Env): Promise<Response>
 		const h3 = computeH3(body.lat, body.lon);
 
 		await env.DB.prepare(
-			`INSERT INTO locations (timestamp, lat, lon, accuracy, source, semantic_type, h3_res7, h3_res9)
+			`INSERT OR IGNORE INTO locations (timestamp, lat, lon, accuracy, source, semantic_type, h3_res7, h3_res9)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 		).bind(
 			timestamp,
@@ -338,7 +338,7 @@ async function handlePostLocation(request: Request, env: Env): Promise<Response>
 		const h3 = computeH3(body.lat, body.lon);
 
 		await env.DB.prepare(
-			`INSERT INTO locations (timestamp, lat, lon, accuracy, source, semantic_type, activity_type, h3_res7, h3_res9)
+			`INSERT OR IGNORE INTO locations (timestamp, lat, lon, accuracy, source, semantic_type, activity_type, h3_res7, h3_res9)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 		).bind(
 			timestamp,
@@ -369,7 +369,7 @@ async function handlePostLocation(request: Request, env: Env): Promise<Response>
 		const h3 = computeH3(body.lat, body.lon);
 
 		await env.DB.prepare(
-			`INSERT INTO locations (timestamp, lat, lon, accuracy, source, place_id, semantic_type, activity_type, altitude, speed, h3_res7, h3_res9)
+			`INSERT OR IGNORE INTO locations (timestamp, lat, lon, accuracy, source, place_id, semantic_type, activity_type, altitude, speed, h3_res7, h3_res9)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 		).bind(
 			timestamp,
@@ -415,6 +415,7 @@ async function handleBatchImport(request: Request, env: Env): Promise<Response> 
 
 	const batchSize = 100;
 	let imported = 0;
+	let duplicates = 0;
 	let errors = 0;
 
 	for (let i = 0; i < valid.length; i += batchSize) {
@@ -422,7 +423,7 @@ async function handleBatchImport(request: Request, env: Env): Promise<Response> 
 		const stmts = chunk.map(({ timestamp, loc }) => {
 			const h3 = computeH3(loc.lat, loc.lon);
 			return env.DB.prepare(
-				`INSERT INTO locations (timestamp, lat, lon, accuracy, source, place_id, semantic_type, activity_type, altitude, speed, h3_res7, h3_res9)
+				`INSERT OR IGNORE INTO locations (timestamp, lat, lon, accuracy, source, place_id, semantic_type, activity_type, altitude, speed, h3_res7, h3_res9)
 				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 			).bind(
 				timestamp,
@@ -441,8 +442,11 @@ async function handleBatchImport(request: Request, env: Env): Promise<Response> 
 		});
 
 		try {
-			await env.DB.batch(stmts);
-			imported += chunk.length;
+			// INSERT OR IGNORE のため、UNIQUE制約に当たった行は changes = 0 になる
+			const results = await env.DB.batch(stmts);
+			const inserted = results.reduce((sum, r) => sum + (r.meta?.changes ?? 0), 0);
+			imported += inserted;
+			duplicates += chunk.length - inserted;
 		} catch (e) {
 			errors += chunk.length;
 			console.error(`Batch error at offset ${i}:`, e);
@@ -452,6 +456,7 @@ async function handleBatchImport(request: Request, env: Env): Promise<Response> 
 	return jsonResponse({
 		status: "ok",
 		imported,
+		duplicates,
 		errors,
 		invalid,
 		total: body.locations.length,
