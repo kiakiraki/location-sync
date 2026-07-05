@@ -460,16 +460,6 @@ export default {
 			return handleHealth(env);
 		}
 
-		// デバッグ: リクエストをそのまま返す（認証前、一時的）
-		if (path === "/debug" && method === "POST") {
-			const body = await request.text();
-			const headers: Record<string, string> = {};
-			request.headers.forEach((v, k) => { headers[k] = v; });
-			console.log("DEBUG HEADERS:", JSON.stringify(headers));
-			console.log("DEBUG BODY:", body.substring(0, 1000));
-			return jsonResponse({ headers, body: body.substring(0, 2000) });
-		}
-
 		// All other endpoints require auth
 		if (!authenticate(request, env)) {
 			return unauthorized();
