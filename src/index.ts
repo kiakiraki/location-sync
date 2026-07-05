@@ -132,12 +132,20 @@ export function haversineKm(lat1: number, lon1: number, lat2: number, lon2: numb
 }
 
 // --- Timestamp normalization ---
-// Google Takeout: +0900 (コロンなし), OwnTracks: Z (UTC)
-// SQLite の datetime() は +09:00 形式を要求するため、コロンなしオフセットを変換
-const TS_NORM = `CASE WHEN timestamp GLOB '*[+-][0-9][0-9][0-9][0-9]'
-  THEN substr(timestamp, 1, length(timestamp) - 2) || ':' || substr(timestamp, -2)
-  ELSE timestamp END`;
-const TS_UTC = `datetime(${TS_NORM})`;
+// timestampカラムは正準形（UTC ISO 8601: YYYY-MM-DDTHH:MM:SS.sssZ）で保存する。
+// 全行が正準形であれば素の文字列比較で時系列順が成立し、
+// idx_locations_timestamp が効く（migrations/0003 で既存データも正規化済み）。
+// Google Takeout の +0900（コロンなしオフセット）等は書き込み時にここで吸収する。
+export function normalizeTimestamp(input: unknown): string | null {
+	if (typeof input !== "string" || input === "") return null;
+	// "+0900" → "+09:00"（Date.parse はコロンなしも解釈するが、明示的に揃える）
+	const fixed = /[+-]\d{4}$/.test(input)
+		? `${input.slice(0, -2)}:${input.slice(-2)}`
+		: input;
+	const d = new Date(fixed);
+	if (isNaN(d.getTime())) return null;
+	return d.toISOString();
+}
 
 // --- Handlers ---
 
@@ -163,8 +171,17 @@ async function handleGetLocations(request: Request, env: Env): Promise<Response>
 	const days = Math.min(Math.max(parseInt(url.searchParams.get("days") ?? "7"), 1), 365);
 	const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") ?? "1000"), 1), 10000);
 	const source = url.searchParams.get("source");  // path, visit, activity, raw:WIFI, owntracks
-	const after = url.searchParams.get("after");     // ISO 8601
-	const before = url.searchParams.get("before");   // ISO 8601
+	const afterParam = url.searchParams.get("after");   // ISO 8601
+	const beforeParam = url.searchParams.get("before"); // ISO 8601
+
+	const after = afterParam ? normalizeTimestamp(afterParam) : null;
+	if (afterParam && !after) {
+		return errorResponse("after must be a valid ISO 8601 datetime");
+	}
+	const before = beforeParam ? normalizeTimestamp(beforeParam) : null;
+	if (beforeParam && !before) {
+		return errorResponse("before must be a valid ISO 8601 datetime");
+	}
 
 	// 空間フィルタ
 	const nearLat = url.searchParams.get("near_lat");
@@ -195,16 +212,16 @@ async function handleGetLocations(request: Request, env: Env): Promise<Response>
 
 	// 空間フィルタ指定時かつafter未指定の場合、デフォルトのdays制限を外す
 	if (after) {
-		query += ` AND ${TS_UTC} >= ?`;
+		query += " AND timestamp >= ?";
 		params.push(after);
 	} else if (!spatialFilter) {
 		// デフォルト: N日前から（空間フィルタなしの場合のみ）
-		query += ` AND ${TS_UTC} >= datetime('now', ?)`;
-		params.push(`-${days} days`);
+		query += " AND timestamp >= ?";
+		params.push(new Date(Date.now() - days * 86_400_000).toISOString());
 	}
 
 	if (before) {
-		query += ` AND ${TS_UTC} <= ?`;
+		query += " AND timestamp <= ?";
 		params.push(before);
 	}
 
@@ -219,7 +236,7 @@ async function handleGetLocations(request: Request, env: Env): Promise<Response>
 		params.push(...spatialFilter.cells);
 	}
 
-	query += ` ORDER BY ${TS_UTC} DESC LIMIT ?`;
+	query += " ORDER BY timestamp DESC LIMIT ?";
 	params.push(limit);
 
 	const results = await env.DB.prepare(query).bind(...params).all();
@@ -249,7 +266,7 @@ async function handleGetLocations(request: Request, env: Env): Promise<Response>
 
 async function handleGetLatest(env: Env): Promise<Response> {
 	const result = await env.DB.prepare(
-		`SELECT * FROM locations ORDER BY ${TS_UTC} DESC LIMIT 1`
+		"SELECT * FROM locations ORDER BY timestamp DESC LIMIT 1"
 	).first();
 
 	if (!result) {
@@ -345,7 +362,10 @@ async function handlePostLocation(request: Request, env: Env): Promise<Response>
 
 	// 汎用 POST（カスタムアプリ等）
 	if (body.lat !== undefined && body.lon !== undefined) {
-		const timestamp = (body.timestamp as string) ?? new Date().toISOString();
+		if (body.timestamp !== undefined && normalizeTimestamp(body.timestamp) === null) {
+			return errorResponse("timestamp must be a valid ISO 8601 datetime");
+		}
+		const timestamp = normalizeTimestamp(body.timestamp) ?? new Date().toISOString();
 		const h3 = computeH3(body.lat, body.lon);
 
 		await env.DB.prepare(
@@ -379,21 +399,35 @@ async function handleBatchImport(request: Request, env: Env): Promise<Response> 
 		return errorResponse("Expected { locations: [...] }");
 	}
 
+	// 事前バリデーション: timestamp/lat/lon はNOT NULLカラムなので、
+	// 不正な行が混ざるとバッチ全体（100件）が失敗する。先に弾いて件数を報告する
+	const valid: { timestamp: string; loc: Record<string, unknown> }[] = [];
+	let invalid = 0;
+	for (const loc of body.locations) {
+		const timestamp = normalizeTimestamp(loc.timestamp);
+		const h3 = computeH3(loc.lat, loc.lon);
+		if (timestamp === null || h3.h3_res7 === null) {
+			invalid++;
+			continue;
+		}
+		valid.push({ timestamp, loc });
+	}
+
 	const batchSize = 100;
 	let imported = 0;
 	let errors = 0;
 
-	for (let i = 0; i < body.locations.length; i += batchSize) {
-		const chunk = body.locations.slice(i, i + batchSize);
-		const stmts = chunk.map((loc) => {
+	for (let i = 0; i < valid.length; i += batchSize) {
+		const chunk = valid.slice(i, i + batchSize);
+		const stmts = chunk.map(({ timestamp, loc }) => {
 			const h3 = computeH3(loc.lat, loc.lon);
 			return env.DB.prepare(
 				`INSERT INTO locations (timestamp, lat, lon, accuracy, source, place_id, semantic_type, activity_type, altitude, speed, h3_res7, h3_res9)
 				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 			).bind(
-				loc.timestamp ?? null,
-				loc.lat ?? null,
-				loc.lon ?? null,
+				timestamp,
+				loc.lat,
+				loc.lon,
 				loc.accuracy ?? null,
 				loc.source ?? null,
 				loc.place_id ?? null,
@@ -419,6 +453,7 @@ async function handleBatchImport(request: Request, env: Env): Promise<Response> 
 		status: "ok",
 		imported,
 		errors,
+		invalid,
 		total: body.locations.length,
 	});
 }
