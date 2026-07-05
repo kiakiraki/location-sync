@@ -67,6 +67,23 @@ function errorResponse(message: string, status = 400): Response {
 	return jsonResponse({ error: message }, status);
 }
 
+// parseIntがNaNを返すケース（"abc"等）はデフォルト値に落とす
+function clampInt(value: string | null, def: number, min: number, max: number): number {
+	const n = parseInt(value ?? "", 10);
+	if (isNaN(n)) return def;
+	return Math.min(Math.max(n, min), max);
+}
+
+async function readJsonBody(request: Request): Promise<Record<string, unknown> | null> {
+	try {
+		const body = await request.json();
+		if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
+		return body as Record<string, unknown>;
+	} catch {
+		return null;
+	}
+}
+
 // --- CORS ---
 
 function handleCors(request: Request): Response | null {
@@ -168,8 +185,8 @@ async function handleGetLocations(request: Request, env: Env): Promise<Response>
 	const url = new URL(request.url);
 
 	// クエリパラメータ
-	const days = Math.min(Math.max(parseInt(url.searchParams.get("days") ?? "7"), 1), 365);
-	const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") ?? "1000"), 1), 10000);
+	const days = clampInt(url.searchParams.get("days"), 7, 1, 365);
+	const limit = clampInt(url.searchParams.get("limit"), 1000, 1, 10000);
 	const source = url.searchParams.get("source");  // path, visit, activity, raw:WIFI, owntracks
 	const afterParam = url.searchParams.get("after");   // ISO 8601
 	const beforeParam = url.searchParams.get("before"); // ISO 8601
@@ -277,7 +294,10 @@ async function handleGetLatest(env: Env): Promise<Response> {
 }
 
 async function handlePostLocation(request: Request, env: Env): Promise<Response> {
-	const body = await request.json() as Record<string, unknown>;
+	const body = await readJsonBody(request);
+	if (body === null) {
+		return errorResponse("Invalid JSON body");
+	}
 
 	// OwnTracks HTTP mode payload
 	// https://owntracks.org/booklet/tech/http/
@@ -393,17 +413,17 @@ async function handlePostLocation(request: Request, env: Env): Promise<Response>
 }
 
 async function handleBatchImport(request: Request, env: Env): Promise<Response> {
-	const body = await request.json() as { locations: Record<string, unknown>[] };
-
-	if (!body.locations || !Array.isArray(body.locations)) {
+	const body = await readJsonBody(request);
+	if (body === null || !Array.isArray(body.locations)) {
 		return errorResponse("Expected { locations: [...] }");
 	}
+	const rows = body.locations as Record<string, unknown>[];
 
 	// 事前バリデーション: timestamp/lat/lon はNOT NULLカラムなので、
 	// 不正な行が混ざるとバッチ全体（100件）が失敗する。先に弾いて件数を報告する
 	const valid: { timestamp: string; loc: Record<string, unknown> }[] = [];
 	let invalid = 0;
-	for (const loc of body.locations) {
+	for (const loc of rows) {
 		const timestamp = normalizeTimestamp(loc.timestamp);
 		const h3 = computeH3(loc.lat, loc.lon);
 		if (timestamp === null || h3.h3_res7 === null) {
@@ -459,7 +479,7 @@ async function handleBatchImport(request: Request, env: Env): Promise<Response> 
 		duplicates,
 		errors,
 		invalid,
-		total: body.locations.length,
+		total: rows.length,
 	});
 }
 
