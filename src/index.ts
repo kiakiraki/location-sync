@@ -21,14 +21,25 @@ export interface Env {
 
 // --- Auth ---
 
-function authenticate(request: Request, env: Env): boolean {
+// タイミング攻撃対策の定数時間比較（長さの一致だけは先に判定する）
+function safeEqual(a: string, b: string): boolean {
+	const enc = new TextEncoder();
+	const ab = enc.encode(a);
+	const bb = enc.encode(b);
+	if (ab.length !== bb.length) return false;
+	let diff = 0;
+	for (let i = 0; i < ab.length; i++) diff |= ab[i] ^ bb[i];
+	return diff === 0;
+}
+
+export function authenticate(request: Request, env: Env): boolean {
 	const auth = request.headers.get("Authorization");
 	if (!auth) return false;
 
 	// Bearer Token
 	if (auth.startsWith("Bearer ")) {
 		const token = auth.replace("Bearer ", "").trim();
-		return token === env.API_TOKEN;
+		return safeEqual(token, env.API_TOKEN);
 	}
 
 	// Basic Auth (OwnTracks HTTP mode)
@@ -36,8 +47,9 @@ function authenticate(request: Request, env: Env): boolean {
 	if (auth.startsWith("Basic ")) {
 		try {
 			const decoded = atob(auth.replace("Basic ", "").trim());
-			const [, password] = decoded.split(":");
-			return password === env.API_TOKEN;
+			const sep = decoded.indexOf(":");
+			if (sep < 0) return false;
+			return safeEqual(decoded.slice(sep + 1), env.API_TOKEN);
 		} catch {
 			return false;
 		}
@@ -56,10 +68,7 @@ function unauthorized(): Response {
 function jsonResponse(data: unknown, status = 200): Response {
 	return new Response(JSON.stringify(data), {
 		status,
-		headers: {
-			"Content-Type": "application/json",
-			"Access-Control-Allow-Origin": "*",
-		},
+		headers: { "Content-Type": "application/json" },
 	});
 }
 
@@ -67,25 +76,26 @@ function errorResponse(message: string, status = 400): Response {
 	return jsonResponse({ error: message }, status);
 }
 
-// --- CORS ---
+// parseIntがNaNを返すケース（"abc"等）はデフォルト値に落とす
+function clampInt(value: string | null, def: number, min: number, max: number): number {
+	const n = parseInt(value ?? "", 10);
+	if (isNaN(n)) return def;
+	return Math.min(Math.max(n, min), max);
+}
 
-function handleCors(request: Request): Response | null {
-	if (request.method === "OPTIONS") {
-		return new Response(null, {
-			headers: {
-				"Access-Control-Allow-Origin": "*",
-				"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-				"Access-Control-Allow-Headers": "Content-Type, Authorization",
-				"Access-Control-Max-Age": "86400",
-			},
-		});
+async function readJsonBody(request: Request): Promise<Record<string, unknown> | null> {
+	try {
+		const body = await request.json();
+		if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
+		return body as Record<string, unknown>;
+	} catch {
+		return null;
 	}
-	return null;
 }
 
 // --- H3 helpers ---
 
-function computeH3(lat: unknown, lon: unknown): { h3_res7: string | null; h3_res9: string | null } {
+export function computeH3(lat: unknown, lon: unknown): { h3_res7: string | null; h3_res9: string | null } {
 	if (lat == null || lon == null) return { h3_res7: null, h3_res9: null };
 	const la = Number(lat);
 	const lo = Number(lon);
@@ -96,29 +106,58 @@ function computeH3(lat: unknown, lon: unknown): { h3_res7: string | null; h3_res
 	};
 }
 
-function buildNearbyParams(lat: number, lon: number, radiusKm: number): {
+// D1のバインドパラメータ上限（100個/クエリ）を超えないよう k <= 5 に制限する。
+// gridDisk(k=5) は 91セル。他の条件パラメータ（after/before/source/limit）を
+// 合わせても100未満に収まる。
+const MAX_GRID_K = 5;
+
+// 検索可能な最大半径。res7 × k=5 でカバーできる範囲（~7km）まで。
+// 注意: Workersランタイムはエントリモジュールからの関数以外のexportを
+// 許可しないため、この定数はexportしない（テスト側は値を直接持つ）
+const MAX_RADIUS_KM = MAX_GRID_K * 1.406;
+
+export function buildNearbyParams(lat: number, lon: number, radiusKm: number): {
 	column: string;
 	cells: string[];
 } {
-	// radius >= 2km → res7 (avg edge ~1.406km), else res9 (avg edge ~0.201km)
-	if (radiusKm >= 2) {
-		const k = Math.min(Math.ceil(radiusKm / 1.406), 10);
+	// radius > 1km → res7 (avg edge ~1.406km), else res9 (avg edge ~0.201km)
+	// res9 は k <= 5 でカバーできる ~1km までに限定する
+	if (radiusKm > MAX_GRID_K * 0.201) {
+		const k = Math.min(Math.ceil(radiusKm / 1.406), MAX_GRID_K);
 		const center = latLngToCell(lat, lon, 7);
 		return { column: "h3_res7", cells: gridDisk(center, k) };
 	} else {
-		const k = Math.min(Math.ceil(radiusKm / 0.201), 10);
+		const k = Math.min(Math.ceil(radiusKm / 0.201), MAX_GRID_K);
 		const center = latLngToCell(lat, lon, 9);
 		return { column: "h3_res9", cells: gridDisk(center, k) };
 	}
 }
 
+export function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+	const toRad = (d: number) => (d * Math.PI) / 180;
+	const dLat = toRad(lat2 - lat1);
+	const dLon = toRad(lon2 - lon1);
+	const a =
+		Math.sin(dLat / 2) ** 2 +
+		Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+	return 6371 * 2 * Math.asin(Math.sqrt(a));
+}
+
 // --- Timestamp normalization ---
-// Google Takeout: +0900 (コロンなし), OwnTracks: Z (UTC)
-// SQLite の datetime() は +09:00 形式を要求するため、コロンなしオフセットを変換
-const TS_NORM = `CASE WHEN timestamp GLOB '*[+-][0-9][0-9][0-9][0-9]'
-  THEN substr(timestamp, 1, length(timestamp) - 2) || ':' || substr(timestamp, -2)
-  ELSE timestamp END`;
-const TS_UTC = `datetime(${TS_NORM})`;
+// timestampカラムは正準形（UTC ISO 8601: YYYY-MM-DDTHH:MM:SS.sssZ）で保存する。
+// 全行が正準形であれば素の文字列比較で時系列順が成立し、
+// idx_locations_timestamp が効く（migrations/0003 で既存データも正規化済み）。
+// Google Takeout の +0900（コロンなしオフセット）等は書き込み時にここで吸収する。
+export function normalizeTimestamp(input: unknown): string | null {
+	if (typeof input !== "string" || input === "") return null;
+	// "+0900" → "+09:00"（Date.parse はコロンなしも解釈するが、明示的に揃える）
+	const fixed = /[+-]\d{4}$/.test(input)
+		? `${input.slice(0, -2)}:${input.slice(-2)}`
+		: input;
+	const d = new Date(fixed);
+	if (isNaN(d.getTime())) return null;
+	return d.toISOString();
+}
 
 // --- Handlers ---
 
@@ -141,11 +180,20 @@ async function handleGetLocations(request: Request, env: Env): Promise<Response>
 	const url = new URL(request.url);
 
 	// クエリパラメータ
-	const days = Math.min(Math.max(parseInt(url.searchParams.get("days") ?? "7"), 1), 365);
-	const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") ?? "1000"), 1), 10000);
+	const days = clampInt(url.searchParams.get("days"), 7, 1, 365);
+	const limit = clampInt(url.searchParams.get("limit"), 1000, 1, 10000);
 	const source = url.searchParams.get("source");  // path, visit, activity, raw:WIFI, owntracks
-	const after = url.searchParams.get("after");     // ISO 8601
-	const before = url.searchParams.get("before");   // ISO 8601
+	const afterParam = url.searchParams.get("after");   // ISO 8601
+	const beforeParam = url.searchParams.get("before"); // ISO 8601
+
+	const after = afterParam ? normalizeTimestamp(afterParam) : null;
+	if (afterParam && !after) {
+		return errorResponse("after must be a valid ISO 8601 datetime");
+	}
+	const before = beforeParam ? normalizeTimestamp(beforeParam) : null;
+	if (beforeParam && !before) {
+		return errorResponse("before must be a valid ISO 8601 datetime");
+	}
 
 	// 空間フィルタ
 	const nearLat = url.searchParams.get("near_lat");
@@ -161,7 +209,7 @@ async function handleGetLocations(request: Request, env: Env): Promise<Response>
 		if (isNaN(lat) || isNaN(lon)) {
 			return errorResponse("near_lat and near_lon must be valid numbers");
 		}
-		const radiusKm = Math.min(Math.max(parseFloat(radiusParam ?? "1"), 0.1), 50);
+		const radiusKm = Math.min(Math.max(parseFloat(radiusParam ?? "1"), 0.1), MAX_RADIUS_KM);
 		spatialFilter = buildNearbyParams(lat, lon, radiusKm);
 		spatialMeta = {
 			query_center: { lat, lon },
@@ -176,16 +224,16 @@ async function handleGetLocations(request: Request, env: Env): Promise<Response>
 
 	// 空間フィルタ指定時かつafter未指定の場合、デフォルトのdays制限を外す
 	if (after) {
-		query += ` AND ${TS_UTC} >= ?`;
+		query += " AND timestamp >= ?";
 		params.push(after);
 	} else if (!spatialFilter) {
 		// デフォルト: N日前から（空間フィルタなしの場合のみ）
-		query += ` AND ${TS_UTC} >= datetime('now', ?)`;
-		params.push(`-${days} days`);
+		query += " AND timestamp >= ?";
+		params.push(new Date(Date.now() - days * 86_400_000).toISOString());
 	}
 
 	if (before) {
-		query += ` AND ${TS_UTC} <= ?`;
+		query += " AND timestamp <= ?";
 		params.push(before);
 	}
 
@@ -200,14 +248,25 @@ async function handleGetLocations(request: Request, env: Env): Promise<Response>
 		params.push(...spatialFilter.cells);
 	}
 
-	query += ` ORDER BY ${TS_UTC} DESC LIMIT ?`;
+	query += " ORDER BY timestamp DESC LIMIT ?";
 	params.push(limit);
 
 	const results = await env.DB.prepare(query).bind(...params).all();
 
+	// H3セルは六角形なので円と完全には一致しない。haversineで正確な半径に絞る
+	let locations = results.results;
+	if (spatialFilter && spatialMeta) {
+		const { lat, lon } = spatialMeta.query_center as { lat: number; lon: number };
+		const radiusKm = spatialMeta.radius_km as number;
+		locations = locations.filter((row) => {
+			const r = row as { lat: number | null; lon: number | null };
+			return r.lat != null && r.lon != null && haversineKm(lat, lon, r.lat, r.lon) <= radiusKm;
+		});
+	}
+
 	const response: Record<string, unknown> = {
-		count: results.results.length,
-		locations: results.results,
+		count: locations.length,
+		locations,
 	};
 
 	if (spatialMeta) {
@@ -219,7 +278,7 @@ async function handleGetLocations(request: Request, env: Env): Promise<Response>
 
 async function handleGetLatest(env: Env): Promise<Response> {
 	const result = await env.DB.prepare(
-		`SELECT * FROM locations ORDER BY ${TS_UTC} DESC LIMIT 1`
+		"SELECT * FROM locations ORDER BY timestamp DESC LIMIT 1"
 	).first();
 
 	if (!result) {
@@ -230,7 +289,10 @@ async function handleGetLatest(env: Env): Promise<Response> {
 }
 
 async function handlePostLocation(request: Request, env: Env): Promise<Response> {
-	const body = await request.json() as Record<string, unknown>;
+	const body = await readJsonBody(request);
+	if (body === null) {
+		return errorResponse("Invalid JSON body");
+	}
 
 	// OwnTracks HTTP mode payload
 	// https://owntracks.org/booklet/tech/http/
@@ -241,7 +303,7 @@ async function handlePostLocation(request: Request, env: Env): Promise<Response>
 		const h3 = computeH3(body.lat, body.lon);
 
 		await env.DB.prepare(
-			`INSERT INTO locations (timestamp, lat, lon, accuracy, altitude, speed, source, h3_res7, h3_res9)
+			`INSERT OR IGNORE INTO locations (timestamp, lat, lon, accuracy, altitude, speed, source, h3_res7, h3_res9)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 		).bind(
 			timestamp,
@@ -267,7 +329,7 @@ async function handlePostLocation(request: Request, env: Env): Promise<Response>
 		const h3 = computeH3(body.lat, body.lon);
 
 		await env.DB.prepare(
-			`INSERT INTO locations (timestamp, lat, lon, accuracy, source, semantic_type, h3_res7, h3_res9)
+			`INSERT OR IGNORE INTO locations (timestamp, lat, lon, accuracy, source, semantic_type, h3_res7, h3_res9)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 		).bind(
 			timestamp,
@@ -291,7 +353,7 @@ async function handlePostLocation(request: Request, env: Env): Promise<Response>
 		const h3 = computeH3(body.lat, body.lon);
 
 		await env.DB.prepare(
-			`INSERT INTO locations (timestamp, lat, lon, accuracy, source, semantic_type, activity_type, h3_res7, h3_res9)
+			`INSERT OR IGNORE INTO locations (timestamp, lat, lon, accuracy, source, semantic_type, activity_type, h3_res7, h3_res9)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 		).bind(
 			timestamp,
@@ -315,11 +377,14 @@ async function handlePostLocation(request: Request, env: Env): Promise<Response>
 
 	// 汎用 POST（カスタムアプリ等）
 	if (body.lat !== undefined && body.lon !== undefined) {
-		const timestamp = (body.timestamp as string) ?? new Date().toISOString();
+		if (body.timestamp !== undefined && normalizeTimestamp(body.timestamp) === null) {
+			return errorResponse("timestamp must be a valid ISO 8601 datetime");
+		}
+		const timestamp = normalizeTimestamp(body.timestamp) ?? new Date().toISOString();
 		const h3 = computeH3(body.lat, body.lon);
 
 		await env.DB.prepare(
-			`INSERT INTO locations (timestamp, lat, lon, accuracy, source, place_id, semantic_type, activity_type, altitude, speed, h3_res7, h3_res9)
+			`INSERT OR IGNORE INTO locations (timestamp, lat, lon, accuracy, source, place_id, semantic_type, activity_type, altitude, speed, h3_res7, h3_res9)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 		).bind(
 			timestamp,
@@ -343,27 +408,42 @@ async function handlePostLocation(request: Request, env: Env): Promise<Response>
 }
 
 async function handleBatchImport(request: Request, env: Env): Promise<Response> {
-	const body = await request.json() as { locations: Record<string, unknown>[] };
-
-	if (!body.locations || !Array.isArray(body.locations)) {
+	const body = await readJsonBody(request);
+	if (body === null || !Array.isArray(body.locations)) {
 		return errorResponse("Expected { locations: [...] }");
+	}
+	const rows = body.locations as Record<string, unknown>[];
+
+	// 事前バリデーション: timestamp/lat/lon はNOT NULLカラムなので、
+	// 不正な行が混ざるとバッチ全体（100件）が失敗する。先に弾いて件数を報告する
+	const valid: { timestamp: string; loc: Record<string, unknown> }[] = [];
+	let invalid = 0;
+	for (const loc of rows) {
+		const timestamp = normalizeTimestamp(loc.timestamp);
+		const h3 = computeH3(loc.lat, loc.lon);
+		if (timestamp === null || h3.h3_res7 === null) {
+			invalid++;
+			continue;
+		}
+		valid.push({ timestamp, loc });
 	}
 
 	const batchSize = 100;
 	let imported = 0;
+	let duplicates = 0;
 	let errors = 0;
 
-	for (let i = 0; i < body.locations.length; i += batchSize) {
-		const chunk = body.locations.slice(i, i + batchSize);
-		const stmts = chunk.map((loc) => {
+	for (let i = 0; i < valid.length; i += batchSize) {
+		const chunk = valid.slice(i, i + batchSize);
+		const stmts = chunk.map(({ timestamp, loc }) => {
 			const h3 = computeH3(loc.lat, loc.lon);
 			return env.DB.prepare(
-				`INSERT INTO locations (timestamp, lat, lon, accuracy, source, place_id, semantic_type, activity_type, altitude, speed, h3_res7, h3_res9)
+				`INSERT OR IGNORE INTO locations (timestamp, lat, lon, accuracy, source, place_id, semantic_type, activity_type, altitude, speed, h3_res7, h3_res9)
 				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 			).bind(
-				loc.timestamp ?? null,
-				loc.lat ?? null,
-				loc.lon ?? null,
+				timestamp,
+				loc.lat,
+				loc.lon,
 				loc.accuracy ?? null,
 				loc.source ?? null,
 				loc.place_id ?? null,
@@ -377,8 +457,11 @@ async function handleBatchImport(request: Request, env: Env): Promise<Response> 
 		});
 
 		try {
-			await env.DB.batch(stmts);
-			imported += chunk.length;
+			// INSERT OR IGNORE のため、UNIQUE制約に当たった行は changes = 0 になる
+			const results = await env.DB.batch(stmts);
+			const inserted = results.reduce((sum, r) => sum + (r.meta?.changes ?? 0), 0);
+			imported += inserted;
+			duplicates += chunk.length - inserted;
 		} catch (e) {
 			errors += chunk.length;
 			console.error(`Batch error at offset ${i}:`, e);
@@ -388,8 +471,10 @@ async function handleBatchImport(request: Request, env: Env): Promise<Response> 
 	return jsonResponse({
 		status: "ok",
 		imported,
+		duplicates,
 		errors,
-		total: body.locations.length,
+		invalid,
+		total: rows.length,
 	});
 }
 
@@ -447,10 +532,6 @@ async function handleBackfillH3(env: Env): Promise<Response> {
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
-		// CORS preflight
-		const corsResponse = handleCors(request);
-		if (corsResponse) return corsResponse;
-
 		const url = new URL(request.url);
 		const path = url.pathname;
 		const method = request.method;
@@ -458,16 +539,6 @@ export default {
 		// Health check (no auth)
 		if (path === "/health" && method === "GET") {
 			return handleHealth(env);
-		}
-
-		// デバッグ: リクエストをそのまま返す（認証前、一時的）
-		if (path === "/debug" && method === "POST") {
-			const body = await request.text();
-			const headers: Record<string, string> = {};
-			request.headers.forEach((v, k) => { headers[k] = v; });
-			console.log("DEBUG HEADERS:", JSON.stringify(headers));
-			console.log("DEBUG BODY:", body.substring(0, 1000));
-			return jsonResponse({ headers, body: body.substring(0, 2000) });
 		}
 
 		// All other endpoints require auth
