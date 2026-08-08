@@ -13,5 +13,9 @@ chunks/
 # Dependencies
 node_modules/
 
+# Python (parse_location_history.py / scripts/*.py の実行時に生成される)
+__pycache__/
+*.py[cod]
+
 # OS
 .DS_Store
