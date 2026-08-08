@@ -24,6 +24,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      # wrangler-action は wranglerVersion 未指定なら既存のインストールを使う。
+      # npm ci を挟まないと最新の wrangler を新規インストールしようとして
+      # peer 依存（@cloudflare/workers-types）が衝突する
+      - run: npm ci
       - uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
