@@ -14,7 +14,7 @@
     "h3-js": "^4.4.0"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.18.0",
+    "@cloudflare/vitest-pool-workers": "^0.20.3",
     "@cloudflare/workers-types": "^4.20250405.0",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10",
